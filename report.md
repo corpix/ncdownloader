@@ -10,11 +10,21 @@ The NCDownloader application does **not** use Nextcloud's built-in background jo
 - **Process Management:** The `aria2c` process is managed using the `Symfony\Component\Process\Process` component, as seen in `lib/Aria2/Aria2.php`.
 - **Hooks for Communication:** The application uses a system of shell script hooks (`startHook.sh`, `completeHook.sh`, `errorHook.sh`) to receive status updates from the `aria2c` daemon. These hooks execute `occ` commands to notify the Nextcloud application of download events.
 
-## 2. `yt-dlp` Execution
+## 2. `yt-dlp` Execution and Server Timeouts
 
-- **Execution Method:** `yt-dlp` is executed as a separate process, also using the `Symfony\Component\Process\Process` component, as shown in `lib/Ytdl/Ytdl.php`.
+- **Execution Method:** `yt-dlp` is executed as a separate process using the `Symfony\Component\Process\Process` component, as shown in `lib/Ytdl/Ytdl.php`. The key detail is that it is executed **synchronously** using the `$process->run()` method. This means the PHP worker process (e.g., a php-fpm child process) that handles the user's request will be **blocked** for the entire duration of the `yt-dlp` download.
+
 - **User-Initiated:** The execution of `yt-dlp` is triggered directly by a user's request from their browser. The application then streams the output and errors from the `yt-dlp` process back to the user's browser.
-- **Timeout Mitigation:** To mitigate client timeouts during long downloads, a generous timeout of **10 hours** is set for the `yt-dlp` process. This is a hardcoded value in the `lib/Ytdl/Ytdl.php` file: `$this->timeout = 60 * 60 * 10; //10 hours`.
+
+- **The Illusion of Timeout Mitigation:** The codebase sets a generous timeout of **10 hours** for the `yt-dlp` process using `$process->setTimeout()`. However, this timeout is **not effective** on a standard server configuration. It is the lowest-level timeout in a hierarchy, and it will be preempted by higher-level timeouts.
+
+- **The Hierarchy of Timeouts:**
+  1.  **Web Server Timeout:** Web servers like Nginx or Apache have their own timeouts (e.g., `proxy_read_timeout` in Nginx). If the PHP process doesn't send any data back to the web server for a certain period (typically 30-120 seconds), the web server will terminate the connection.
+  2.  **PHP-FPM Timeout:** PHP-FPM has a `request_terminate_timeout` setting that will kill any script that runs longer than the configured time. This is a hard limit.
+  3.  **PHP `max_execution_time`:** The standard PHP `max_execution_time` setting (often 30 or 60 seconds by default) will stop the script. The codebase does **not** use `set_time_limit(0)` to disable this limit.
+  4.  **Symfony Process Timeout:** The 10-hour timeout in the code. This timeout will only ever be reached if all of the above server-level timeouts are configured to be longer than 10 hours, which is highly unlikely and not a standard configuration.
+
+- **Conclusion:** The current implementation for `yt-dlp` is **not robust** for long-running downloads. It relies on the user having a highly customized server environment with extremely long timeout values. On a typical server, any `yt-dlp` download lasting more than a minute or two is likely to be terminated, and the user will see a gateway timeout error. Furthermore, because the process is synchronous, it holds a PHP worker hostage for the entire duration of the download, which is inefficient and can easily lead to server resource exhaustion under concurrent use.
 
 ## 3. `aria2c` Execution and Persistence
 
